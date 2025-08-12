@@ -5,90 +5,93 @@ const {
   downloadMediaMessage 
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
+const fs = require('fs');
 const pino = require('pino');
 const qrcode = require('qrcode-terminal');
 
-const config = { 
-    PREFIX: '.',
-    TARGET_GROUP_ID: 'XXXXXXXXXX-XXXXXXXXXX@g.us'
-};
+const configPath = './config.json';
+let config = JSON.parse(fs.readFileSync(configPath));
 
 const isViewOnce = (message) => {
-  if (!message) return false;
-  if (message.viewOnceMessage || message.viewOnceMessageV2) {
-    return true;
-  }
-  const mediaMessage = message.imageMessage || message.videoMessage;
-  if (mediaMessage && mediaMessage.viewOnce === true) {
-    return true;
-  }
-  return false;
+    if (!message) return false;
+    if (message.viewOnceMessage || message.viewOnceMessageV2) {
+      return true;
+    }
+    const mediaMessage = message.imageMessage || message.videoMessage;
+    if (mediaMessage && mediaMessage.viewOnce === true) {
+      return true;
+    }
+    return false;
 };
-
+  
 const handleViewOnce = async (m, sock) => {
-  const isSelf = m.key.fromMe;
-  if (!isSelf) {
-    return;
-  }
-
-  const prefix = config.PREFIX;
-  const cmd = m.body.startsWith(prefix) 
-    ? m.body.slice(prefix.length).split(' ')[0].toLowerCase() 
-    : '';
+    // Logika pemicu tetap sama, bot akan merespons semua orang
+    const prefix = config.PREFIX;
+    const cmd = m.body.startsWith(prefix) 
+      ? m.body.slice(prefix.length).split(' ')[0].toLowerCase() 
+      : '';
+      
+    const isReaction = m.message?.reactionMessage;
+    const containsEmoji = m.body && /[\p{Emoji}]/u.test(m.body);
+    const isQuotedMsgViewOnce = isViewOnce(m.quoted?.message);
+  
+    const reactedToViewOnce = isReaction && isQuotedMsgViewOnce;
+    const isEmojiReply = containsEmoji && isQuotedMsgViewOnce;
+    const isTriggeredByCmd = cmd === 'view' && isQuotedMsgViewOnce;
     
-  const isReaction = m.message?.reactionMessage;
-  const containsEmoji = m.body && /[\p{Emoji}]/u.test(m.body);
-  const isQuotedMsgViewOnce = isViewOnce(m.quoted?.message);
-
-  const reactedToViewOnce = isReaction && isQuotedMsgViewOnce;
-  const isEmojiReply = containsEmoji && isQuotedMsgViewOnce;
-  const isTriggeredByCmd = cmd === 'view' && isQuotedMsgViewOnce;
+    const isTriggered = isTriggeredByCmd || isEmojiReply || reactedToViewOnce;
   
-  const isTriggered = isTriggeredByCmd || isEmojiReply || reactedToViewOnce;
-
-  if (!isTriggered) return;
-
-  if (!m.quoted) return;
+    if (!isTriggered) return;
   
-  let msg = m.quoted.message;
-  if (msg.viewOnceMessageV2) msg = msg.viewOnceMessageV2.message;
-  else if (msg.viewOnceMessage) msg = msg.viewOnceMessage.message;
-
-  const messageType = msg ? Object.keys(msg)[0] : null;
-  const isMedia = messageType && ['imageMessage', 'videoMessage', 'audioMessage'].includes(messageType);
+    if (!m.quoted) return;
+    
+    let msg = m.quoted.message;
+    if (msg.viewOnceMessageV2) msg = msg.viewOnceMessageV2.message;
+    else if (msg.viewOnceMessage) msg = msg.viewOnceMessage.message;
   
-  if (!isMedia) return;
-
-  try {
-    const buffer = await downloadMediaMessage(m.quoted, 'buffer', {}, {
-        logger: pino({ level: 'silent' })
-    });
-        
-    if (!buffer) return;
-
-    const originalSenderJid = m.quoted.key.participant || m.quoted.key.remoteJid;
-    const senderNumber = originalSenderJid.split('@')[0];
-    const caption = `> *Successfully bypass media once-view from ${senderNumber}*`;
-    const recipient = config.TARGET_GROUP_ID;
-
-    if (!recipient || !recipient.endsWith('@g.us')) {
-        console.error('[ERROR] Target Group ID is not a valid, please check again.');
-        return;
+    const messageType = msg ? Object.keys(msg)[0] : null;
+    const isMedia = messageType && ['imageMessage', 'videoMessage', 'audioMessage'].includes(messageType);
+    
+    if (!isMedia) return;
+  
+    try {
+      const buffer = await downloadMediaMessage(m.quoted, 'buffer', {}, {
+          logger: pino({ level: 'silent' })
+      });
+          
+      if (!buffer) return;
+  
+      const originalSenderJid = m.quoted.key.participant || m.quoted.key.remoteJid;
+      const senderNumber = originalSenderJid.split('@')[0];
+      const caption = `> *Media sekali-lihat dari ${senderNumber} berhasil dibuka.*`;
+      
+      // ==========================================================
+      // PERUBAHAN UTAMA DI SINI
+      // Tujuan pengiriman sekarang mengambil dari file konfigurasi
+      const recipient = config.TARGET_GROUP_ID;
+      
+      // Pengecekan untuk memastikan grup target sudah diatur
+      if (!recipient || !recipient.endsWith('@g.us')) {
+          console.error('[ERROR] Target Group ID is not valid or not set. Please use .setgroup command.');
+          // Memberi tahu pengguna bahwa grup target belum diatur
+          m.reply('Tujuan grup belum diatur. Masuk ke grup target Anda, lalu ketik .setgroup');
+          return;
+      }
+      // ==========================================================
+  
+      if (messageType === 'imageMessage') {
+        await sock.sendMessage(recipient, { image: buffer, caption: caption });
+      } else if (messageType === 'videoMessage') {
+        await sock.sendMessage(recipient, { video: buffer, mimetype: 'video/mp4', caption: caption });
+      } else if (messageType === 'audioMessage') {  
+        await sock.sendMessage(recipient, { audio: buffer, mimetype: 'audio/ogg', ptt: true });
+      }
+  
+      console.log(`[SUCCESS] Success bypassing view-once and sent to target group ${recipient}.`);
+  
+    } catch (error) {
+      console.error('[ERROR] Failed to bypass media view-once:', error);
     }
-
-    if (messageType === 'imageMessage') {
-      await sock.sendMessage(recipient, { image: buffer, caption: caption });
-    } else if (messageType === 'videoMessage') {
-      await sock.sendMessage(recipient, { video: buffer, mimetype: 'video/mp4', caption: caption });
-    } else if (messageType === 'audioMessage') {  
-      await sock.sendMessage(recipient, { audio: buffer, mimetype: 'audio/ogg', ptt: true });
-    }
-
-    console.log(`[SUCCESS] Success bypass media view-once.`);
-
-  } catch (error) {
-    console.error('[ERROR] Failed to bypass media view-once:', error);
-  }
 };
 
 async function connectToWhatsApp() {
@@ -96,7 +99,6 @@ async function connectToWhatsApp() {
 
   const sock = makeWASocket({
     logger: pino({ level: 'silent' }),
-    printQRInTerminal: true,
     auth: state,
     browser: ['Bot View Once', 'WulungOS', '1.0.0']
   });
@@ -152,10 +154,26 @@ async function connectToWhatsApp() {
       reply: (text) => sock.sendMessage(msg.key.remoteJid, { text: text }, { quoted: msg })
     };
     
+    const command = simpleM.body.toLowerCase();
+    
+    if (command === '.setgroup') { 
+        if (simpleM.from.endsWith('@g.us')) {
+            const newGroupId = simpleM.from;
+            config.TARGET_GROUP_ID = newGroupId;
+            fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+            
+            console.log(`[SUCCESS] Target group has been set to: ${newGroupId}`);
+            simpleM.reply(`✅ Berhasil! Grup ini sekarang telah ditetapkan sebagai target.`);
+        } else {
+            simpleM.reply('❌ Perintah ini hanya bisa digunakan di dalam grup.');
+        }
+        return; 
+    }
+    
     try {
       await handleViewOnce(simpleM, sock);
     } catch (e) {
-      console.error('[ERROR] Failed proccessing image, detail:', e);
+      console.error('[ERROR] Failed proccessing message, detail:', e);
     }
   });
 }
